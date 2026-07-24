@@ -1,65 +1,184 @@
-import Image from "next/image";
+import Link from "next/link";
+import {
+  ArrowRightIcon,
+  FileTextIcon,
+  PlusIcon,
+  SendIcon,
+  ServerIcon,
+} from "lucide-react";
+import { ConnectionError, toErrorMessage } from "@/components/connection-error";
+import { PageHeader } from "@/components/page-header";
+import { StatusBadge } from "@/components/status-badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { collections } from "@/lib/mongodb";
+import { toCampaign } from "@/lib/serialize";
+import { formatDate } from "@/lib/client";
 
-export default function Home() {
+export const dynamic = "force-dynamic";
+
+async function loadDashboard() {
+  const { campaigns, templates, smtp } = await collections();
+  const [recent, campaignCount, templateCount, smtpCount, sentAgg] =
+    await Promise.all([
+      campaigns.find().sort({ createdAt: -1 }).limit(5).toArray(),
+      campaigns.countDocuments(),
+      templates.countDocuments(),
+      smtp.countDocuments(),
+      campaigns
+        .aggregate<{ total: number }>([
+          { $group: { _id: null, total: { $sum: "$stats.sent" } } },
+        ])
+        .toArray(),
+    ]);
+
+  return {
+    recent: recent.map((doc) => toCampaign(doc)),
+    campaignCount,
+    templateCount,
+    smtpCount,
+    totalSent: sentAgg[0]?.total ?? 0,
+  };
+}
+
+export default async function DashboardPage() {
+  let data: Awaited<ReturnType<typeof loadDashboard>>;
+  try {
+    data = await loadDashboard();
+  } catch (err) {
+    return (
+      <>
+        <PageHeader title="Dashboard" />
+        <ConnectionError message={toErrorMessage(err)} />
+      </>
+    );
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+    <>
+      <PageHeader
+        title="Dashboard"
+        description="Turn a Google Sheet or CSV into personalised email, without copy-pasting proposals one at a time."
+        actions={
+          <Button asChild>
+            <Link href="/campaigns/new">
+              <PlusIcon />
+              New campaign
+            </Link>
+          </Button>
+        }
+      />
+
+      {data.smtpCount === 0 ? (
+        <Card className="mb-6 border-dashed">
+          <CardHeader>
+            <CardTitle>Finish setting up</CardTitle>
+            <CardDescription>
+              Add the SMTP server your mail will be sent through — everything
+              else can be done inside a campaign.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button asChild variant="outline">
+              <Link href="/smtp">
+                <ServerIcon />
+                Add SMTP details
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="Emails sent" value={data.totalSent} />
+        <Stat label="Campaigns" value={data.campaignCount} />
+        <Stat label="Templates" value={data.templateCount} />
+        <Stat label="SMTP profiles" value={data.smtpCount} />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle>Recent campaigns</CardTitle>
+            <CardDescription>The last five runs.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {data.recent.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No campaigns yet.
+              </p>
+            ) : (
+              data.recent.map((campaign) => (
+                <Link
+                  key={campaign.id}
+                  href={`/campaigns/${campaign.id}`}
+                  className="flex items-center justify-between gap-4 rounded-lg border px-3 py-2 transition-colors hover:bg-muted/60"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{campaign.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {campaign.stats.sent}/{campaign.stats.total} sent ·{" "}
+                      {formatDate(campaign.createdAt)}
+                    </p>
+                  </div>
+                  <StatusBadge status={campaign.status} />
+                </Link>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Shortcuts</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <Shortcut href="/campaigns/new" icon={SendIcon} label="Start a campaign" />
+            <Shortcut href="/templates" icon={FileTextIcon} label="Write a template" />
+            <Shortcut href="/smtp" icon={ServerIcon} label="Manage SMTP profiles" />
+          </CardContent>
+        </Card>
+      </div>
+    </>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <Card>
+      <CardContent className="py-4">
+        <p className="text-sm text-muted-foreground">{label}</p>
+        <p className="text-2xl font-semibold tabular-nums">
+          {value.toLocaleString()}
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Shortcut({
+  href,
+  icon: Icon,
+  label,
+}: {
+  href: string;
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors hover:bg-muted/60"
+    >
+      <Icon className="size-4 text-muted-foreground" />
+      {label}
+      <ArrowRightIcon className="ml-auto size-4 text-muted-foreground" />
+    </Link>
   );
 }
