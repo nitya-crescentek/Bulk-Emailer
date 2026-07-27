@@ -1,15 +1,10 @@
-import { ObjectId } from "mongodb";
-import { clampRate, handle, HttpError, requireString, toObjectId } from "@/lib/http";
-import { collections } from "@/lib/mongodb";
+import { clampRate, handle, HttpError, requireId, requireString } from "@/lib/http";
+import { prisma } from "@/lib/db";
+import { requireApiUser } from "@/lib/auth";
 import { toCampaign } from "@/lib/serialize";
 import { isEmail, parseCsv, splitAddresses } from "@/lib/source";
-import type {
-  CampaignDoc,
-  FieldBinding,
-  Mapping,
-  RecipientDoc,
-  Row,
-} from "@/lib/types";
+import type { CampaignStats, FieldBinding, Mapping, Row } from "@/lib/types";
+import type { Prisma } from "@/generated/prisma/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,13 +13,20 @@ const INSERT_CHUNK = 1000;
 
 export async function GET() {
   return handle(async () => {
-    const { campaigns, smtp } = await collections();
-    const docs = await campaigns.find().sort({ createdAt: -1 }).limit(100).toArray();
-    const profiles = await smtp.find().toArray();
-    const names = new Map(profiles.map((p) => [p._id!.toString(), p.name]));
+    const user = await requireApiUser();
+    const rows = await prisma.campaign.findMany({
+      where: { userId: user.id },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      include: { smtpProfile: { select: { name: true } } },
+    });
+
+    // One grouped query for every campaign's counters instead of N.
+    const statsById = await statsFor(rows.map((c) => c.id));
+
     return {
-      campaigns: docs.map((doc) =>
-        toCampaign(doc, names.get(doc.smtpProfileId.toString()))
+      campaigns: rows.map((c) =>
+        toCampaign(c, statsById.get(c.id) ?? EMPTY_STATS, c.smtpProfile?.name)
       ),
     };
   });
@@ -32,35 +34,36 @@ export async function GET() {
 
 export async function POST(request: Request) {
   return handle(async () => {
+    const user = await requireApiUser();
     const body = await request.json();
-    const { campaigns, recipients, sources, smtp, templates } = await collections();
 
-    const source = await sources.findOne({ _id: toObjectId(body.sourceId, "sourceId") });
+    const source = await prisma.source.findFirst({
+      where: { id: requireId(body.sourceId, "sourceId"), userId: user.id },
+    });
     if (!source) {
       throw new HttpError(400, "That data source has expired — re-import the sheet or file.");
     }
 
-    const profile = await smtp.findOne({
-      _id: toObjectId(body.smtpProfileId, "smtpProfileId"),
+    const profile = await prisma.smtpProfile.findFirst({
+      where: { id: requireId(body.smtpProfileId, "smtpProfileId"), userId: user.id },
     });
     if (!profile) throw new HttpError(400, "Choose an SMTP profile.");
 
-    const mapping = normalizeMapping(body.mapping, source.columns);
-    const { rows } = parseCsv(source.csv);
-
-    const templateId = body.templateId
-      ? toObjectId(body.templateId, "templateId")
-      : undefined;
-    if (templateId && !(await templates.countDocuments({ _id: templateId }))) {
-      throw new HttpError(400, "That template no longer exists.");
+    let templateId: string | null = null;
+    if (body.templateId) {
+      const template = await prisma.template.findFirst({
+        where: { id: body.templateId, userId: user.id },
+        select: { id: true },
+      });
+      if (!template) throw new HttpError(400, "That template no longer exists.");
+      templateId = template.id;
     }
 
-    const campaignId = new ObjectId();
-    const docs = buildRecipients(rows, mapping, campaignId, {
-      dedupe: body.dedupe !== false,
-    });
+    const mapping = normalizeMapping(body.mapping, source.columns);
+    const { rows } = parseCsv(source.csv);
+    const recipients = buildRecipients(rows, mapping, { dedupe: body.dedupe !== false });
 
-    const sendable = docs.filter((d) => d.status === "pending").length;
+    const sendable = recipients.filter((r) => r.status === "pending").length;
     if (sendable === 0) {
       throw new HttpError(
         400,
@@ -68,36 +71,72 @@ export async function POST(request: Request) {
       );
     }
 
-    const campaign: CampaignDoc = {
-      _id: campaignId,
-      name: requireString(body.name, "Campaign name", { max: 160 }),
-      status: "draft",
-      sourceId: source._id!,
-      sourceLabel: source.fileName ?? source.url ?? "Imported data",
-      columns: source.columns,
-      smtpProfileId: profile._id!,
-      templateId,
-      subject: requireString(body.subject, "Subject", { max: 500 }),
-      html: requireString(body.html, "Email body", { max: 200_000 }),
-      mapping,
-      rateLimit: clampRate(body.rateLimit, profile.rateLimit),
-      stats: {
-        total: docs.length,
-        sent: 0,
-        failed: 0,
-        pending: sendable,
-        skipped: docs.length - sendable,
+    const campaign = await prisma.campaign.create({
+      data: {
+        userId: user.id,
+        name: requireString(body.name, "Campaign name", { max: 160 }),
+        status: "draft",
+        sourceId: source.id,
+        sourceLabel: source.fileName ?? source.url ?? "Imported data",
+        columns: source.columns,
+        smtpProfileId: profile.id,
+        templateId,
+        subject: requireString(body.subject, "Subject", { max: 500 }),
+        html: requireString(body.html, "Email body", { max: 200_000 }),
+        mapping: mapping as unknown as Prisma.InputJsonValue,
+        rateLimit: clampRate(body.rateLimit, profile.rateLimit),
       },
-      createdAt: new Date(),
-    };
+    });
 
-    await campaigns.insertOne(campaign);
-    for (let i = 0; i < docs.length; i += INSERT_CHUNK) {
-      await recipients.insertMany(docs.slice(i, i + INSERT_CHUNK));
+    for (let i = 0; i < recipients.length; i += INSERT_CHUNK) {
+      await prisma.recipient.createMany({
+        data: recipients.slice(i, i + INSERT_CHUNK).map((r) => ({
+          ...r,
+          campaignId: campaign.id,
+          row: r.row as unknown as Prisma.InputJsonValue,
+        })),
+      });
     }
 
-    return { campaign: toCampaign(campaign, profile.name) };
+    const stats: CampaignStats = {
+      total: recipients.length,
+      sent: 0,
+      failed: 0,
+      pending: sendable,
+      skipped: recipients.length - sendable,
+    };
+    return { campaign: toCampaign(campaign, stats, profile.name) };
   });
+}
+
+const EMPTY_STATS: CampaignStats = {
+  total: 0,
+  sent: 0,
+  failed: 0,
+  pending: 0,
+  skipped: 0,
+};
+
+/** Counters for many campaigns in a single grouped query. */
+async function statsFor(ids: string[]): Promise<Map<string, CampaignStats>> {
+  const map = new Map<string, CampaignStats>();
+  if (ids.length === 0) return map;
+
+  const grouped = await prisma.recipient.groupBy({
+    by: ["campaignId", "status"],
+    where: { campaignId: { in: ids } },
+    _count: { _all: true },
+  });
+
+  for (const g of grouped) {
+    const stats = map.get(g.campaignId) ?? { ...EMPTY_STATS };
+    const count = g._count._all;
+    stats.total += count;
+    if (g.status === "sending") stats.pending += count;
+    else if (g.status in stats) stats[g.status as keyof CampaignStats] += count;
+    map.set(g.campaignId, stats);
+  }
+  return map;
 }
 
 function normalizeMapping(input: unknown, columns: string[]): Mapping {
@@ -109,7 +148,8 @@ function normalizeMapping(input: unknown, columns: string[]): Mapping {
 
   const variables: Record<string, FieldBinding> = {};
   for (const [name, binding] of Object.entries(raw.variables ?? {})) {
-    const column = binding?.column && columns.includes(binding.column) ? binding.column : "";
+    const column =
+      binding?.column && columns.includes(binding.column) ? binding.column : "";
     variables[name] = {
       column,
       fallback: typeof binding?.fallback === "string" ? binding.fallback : "",
@@ -122,20 +162,30 @@ function normalizeMapping(input: unknown, columns: string[]): Mapping {
   return { email, cc: optional(raw.cc), bcc: optional(raw.bcc), variables };
 }
 
+interface NewRecipient {
+  index: number;
+  email: string;
+  row: Row;
+  cc: string | null;
+  bcc: string | null;
+  status: string;
+  attempts: number;
+  error: string | null;
+}
+
 function buildRecipients(
   rows: Row[],
   mapping: Mapping,
-  campaignId: ObjectId,
   { dedupe }: { dedupe: boolean }
-): RecipientDoc[] {
+): NewRecipient[] {
   const seen = new Set<string>();
 
   return rows.map((row, i) => {
     const email = (row[mapping.email] ?? "").trim();
     const key = email.toLowerCase();
 
-    let status: RecipientDoc["status"] = "pending";
-    let error: string | undefined;
+    let status = "pending";
+    let error: string | null = null;
 
     if (!email) {
       status = "skipped";
@@ -151,15 +201,14 @@ function buildRecipients(
     if (status === "pending") seen.add(key);
 
     return {
-      campaignId,
       index: i + 1,
       email,
       row,
-      cc: mapping.cc ? splitAddresses(row[mapping.cc]).join(", ") : undefined,
-      bcc: mapping.bcc ? splitAddresses(row[mapping.bcc]).join(", ") : undefined,
+      cc: mapping.cc ? splitAddresses(row[mapping.cc]).join(", ") || null : null,
+      bcc: mapping.bcc ? splitAddresses(row[mapping.bcc]).join(", ") || null : null,
       status,
       attempts: 0,
-      ...(error ? { error } : {}),
+      error,
     };
   });
 }

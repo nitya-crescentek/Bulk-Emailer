@@ -1,5 +1,3 @@
-import { ObjectId } from "mongodb";
-
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -14,13 +12,20 @@ export function badRequest(message: string): never {
   throw new HttpError(400, message);
 }
 
+export function unauthorized(message = "You need to sign in."): never {
+  throw new HttpError(401, message);
+}
+
 export function notFound(message: string): never {
   throw new HttpError(404, message);
 }
 
-export function toObjectId(value: string, label = "id"): ObjectId {
-  if (!ObjectId.isValid(value)) throw new HttpError(400, `Invalid ${label}.`);
-  return new ObjectId(value);
+/** cuid ids are opaque strings; just reject blanks. */
+export function requireId(value: string, label = "id"): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new HttpError(400, `Invalid ${label}.`);
+  }
+  return value;
 }
 
 /** Wraps a handler so thrown HttpErrors become JSON responses. */

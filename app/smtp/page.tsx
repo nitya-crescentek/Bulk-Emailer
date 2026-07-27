@@ -1,17 +1,21 @@
 import { ConnectionError, toErrorMessage } from "@/components/connection-error";
 import { PageHeader } from "@/components/page-header";
 import { SmtpManager } from "@/components/smtp/smtp-manager";
-import { collections } from "@/lib/mongodb";
+import { prisma } from "@/lib/db";
+import { requireUser } from "@/lib/auth";
 import { toSmtpProfile } from "@/lib/serialize";
 import type { SmtpProfile } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function SmtpPage() {
+  const user = await requireUser();
   let profiles: SmtpProfile[];
   try {
-    const { smtp } = await collections();
-    const docs = await smtp.find().sort({ name: 1 }).toArray();
+    const docs = await prisma.smtpProfile.findMany({
+      where: { userId: user.id },
+      orderBy: { name: "asc" },
+    });
     profiles = docs.map(toSmtpProfile);
   } catch (err) {
     return (

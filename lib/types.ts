@@ -1,27 +1,12 @@
-import type { ObjectId } from "mongodb";
+/**
+ * API/DTO shapes shared between server and client. Database row types come from
+ * the generated Prisma client (`@/generated/prisma/client`); these are the
+ * plain, JSON-safe shapes the browser sees.
+ */
 
 export type Row = Record<string, string>;
 
 /* ---------------------------------------------------------------- SMTP --- */
-
-export interface SmtpProfileDoc {
-  _id?: ObjectId;
-  name: string;
-  host: string;
-  port: number;
-  secure: boolean;
-  user: string;
-  /** AES-256-GCM payload — never leaves the server. */
-  password: string;
-  fromName: string;
-  fromEmail: string;
-  replyTo?: string;
-  /** Emails per minute this server tolerates. */
-  rateLimit: number;
-  isDefault?: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-}
 
 /** Shape sent to the browser: password stripped. */
 export interface SmtpProfile {
@@ -42,15 +27,6 @@ export interface SmtpProfile {
 
 /* ------------------------------------------------------------ Template --- */
 
-export interface TemplateDoc {
-  _id?: ObjectId;
-  name: string;
-  subject: string;
-  html: string;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
 export interface Template {
   id: string;
   name: string;
@@ -63,21 +39,6 @@ export interface Template {
 /* -------------------------------------------------------------- Source --- */
 
 export type SourceKind = "google-sheet" | "csv-url" | "csv-upload";
-
-export interface SourceDoc {
-  _id?: ObjectId;
-  kind: SourceKind;
-  /** Original URL as pasted by the user (sheet / csv link). */
-  url?: string;
-  /** Resolved URL actually fetched (sheet export endpoint). */
-  fetchUrl?: string;
-  fileName?: string;
-  /** Raw CSV text, kept so a campaign can be rebuilt without re-uploading. */
-  csv: string;
-  columns: string[];
-  rowCount: number;
-  createdAt: Date;
-}
 
 /** How usable each column would be as the recipient address column. */
 export interface ColumnEmailStats {
@@ -109,7 +70,7 @@ export interface FieldBinding {
 export interface Mapping {
   /** Column holding the recipient address — required. */
   email: string;
-  /** Optional extra address columns (comma separated values allowed). */
+  /** Optional extra address columns. */
   cc?: string;
   bcc?: string;
   /** Template placeholder name -> where its value comes from. */
@@ -133,46 +94,24 @@ export interface CampaignStats {
   skipped: number;
 }
 
-export interface CampaignDoc {
-  _id?: ObjectId;
-  name: string;
-  status: CampaignStatus;
-  sourceId: ObjectId;
-  sourceLabel: string;
-  columns: string[];
-  smtpProfileId: ObjectId;
-  templateId?: ObjectId;
-  /** Snapshot — editing the template later never mutates a sent campaign. */
-  subject: string;
-  html: string;
-  mapping: Mapping;
-  /** Emails per minute. */
-  rateLimit: number;
-  stats: CampaignStats;
-  error?: string;
-  createdAt: Date;
-  startedAt?: Date;
-  finishedAt?: Date;
-}
-
 export interface Campaign {
   id: string;
   name: string;
   status: CampaignStatus;
   sourceLabel: string;
   columns: string[];
-  smtpProfileId: string;
+  smtpProfileId: string | null;
   smtpProfileName?: string;
-  templateId?: string;
+  templateId?: string | null;
   subject: string;
   html: string;
   mapping: Mapping;
   rateLimit: number;
   stats: CampaignStats;
-  error?: string;
+  error?: string | null;
   createdAt: string;
-  startedAt?: string;
-  finishedAt?: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
 }
 
 /* ----------------------------------------------------------- Recipient --- */
@@ -184,22 +123,6 @@ export type RecipientStatus =
   | "failed"
   | "skipped";
 
-export interface RecipientDoc {
-  _id?: ObjectId;
-  campaignId: ObjectId;
-  /** Position in the source file, 1-based, for stable ordering. */
-  index: number;
-  email: string;
-  row: Row;
-  cc?: string;
-  bcc?: string;
-  status: RecipientStatus;
-  attempts: number;
-  error?: string;
-  messageId?: string;
-  sentAt?: Date;
-}
-
 export interface Recipient {
   id: string;
   index: number;
@@ -207,7 +130,7 @@ export interface Recipient {
   row: Row;
   status: RecipientStatus;
   attempts: number;
-  error?: string;
-  messageId?: string;
-  sentAt?: string;
+  error?: string | null;
+  messageId?: string | null;
+  sentAt?: string | null;
 }

@@ -1,11 +1,8 @@
 import { decrypt } from "@/lib/crypto";
-import { handle, HttpError, toObjectId } from "@/lib/http";
-import {
-  createTransport,
-  describeMailError,
-  fromAddress,
-} from "@/lib/mailer";
-import { collections } from "@/lib/mongodb";
+import { handle, HttpError } from "@/lib/http";
+import { prisma } from "@/lib/db";
+import { requireApiUser } from "@/lib/auth";
+import { createTransport, describeMailError, fromAddress } from "@/lib/mailer";
 import { isEmail } from "@/lib/source";
 import { htmlToText } from "@/lib/template";
 
@@ -13,14 +10,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Verifies SMTP credentials, and optionally sends a one-off email.
- * Accepts either `profileId` (stored profile) or inline credentials so the
- * form can be tested before it is saved.
+ * Verifies SMTP credentials, and optionally sends a one-off email. Accepts a
+ * stored `profileId` (this user's) or inline credentials so the form can be
+ * tested before it is saved.
  */
 export async function POST(request: Request) {
   return handle(async () => {
+    const user = await requireApiUser();
     const body = await request.json();
-    const profile = await resolveProfile(body);
+    const profile = await resolveProfile(user.id, body);
 
     const transport = createTransport({
       host: profile.host,
@@ -75,32 +73,42 @@ interface ResolvedProfile {
   replyTo?: string;
 }
 
-async function resolveProfile(body: {
-  profileId?: string;
-  host?: string;
-  port?: number | string;
-  secure?: boolean;
-  user?: string;
-  password?: string;
-  fromName?: string;
-  fromEmail?: string;
-  replyTo?: string;
-}): Promise<ResolvedProfile> {
+async function resolveProfile(
+  userId: string,
+  body: {
+    profileId?: string;
+    host?: string;
+    port?: number | string;
+    secure?: boolean;
+    user?: string;
+    password?: string;
+    fromName?: string;
+    fromEmail?: string;
+    replyTo?: string;
+  }
+): Promise<ResolvedProfile> {
   if (body.profileId) {
-    const { smtp } = await collections();
-    const doc = await smtp.findOne({ _id: toObjectId(body.profileId) });
-    if (!doc) throw new HttpError(404, "SMTP profile not found.");
-    return { ...doc, password: decrypt(doc.password) };
+    const row = await prisma.smtpProfile.findFirst({
+      where: { id: body.profileId, userId },
+    });
+    if (!row) throw new HttpError(404, "SMTP profile not found.");
+    return {
+      host: row.host,
+      port: row.port,
+      secure: row.secure,
+      user: row.username,
+      password: decrypt(row.password),
+      fromName: row.fromName,
+      fromEmail: row.fromEmail,
+      replyTo: row.replyTo ?? undefined,
+    };
   }
 
   if (!body.host || !body.user || !body.fromEmail) {
     throw new HttpError(400, "Host, username and from address are required.");
   }
-
   const password = body.password ?? "";
-  if (!password) {
-    throw new HttpError(400, "Enter the SMTP password to run a test.");
-  }
+  if (!password) throw new HttpError(400, "Enter the SMTP password to run a test.");
 
   return {
     host: body.host,

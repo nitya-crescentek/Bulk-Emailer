@@ -1,78 +1,86 @@
 import type {
+  Campaign as CampaignRow,
+  Recipient as RecipientRow,
+  SmtpProfile as SmtpProfileRow,
+  Template as TemplateRow,
+} from "@/generated/prisma/client";
+import type {
   Campaign,
-  CampaignDoc,
+  CampaignStats,
+  CampaignStatus,
+  Mapping,
   Recipient,
-  RecipientDoc,
+  RecipientStatus,
+  Row,
   SmtpProfile,
-  SmtpProfileDoc,
   Template,
-  TemplateDoc,
 } from "./types";
 
-export function toSmtpProfile(doc: SmtpProfileDoc): SmtpProfile {
+export function toSmtpProfile(row: SmtpProfileRow): SmtpProfile {
   return {
-    id: doc._id!.toString(),
-    name: doc.name,
-    host: doc.host,
-    port: doc.port,
-    secure: doc.secure,
-    user: doc.user,
-    fromName: doc.fromName,
-    fromEmail: doc.fromEmail,
-    replyTo: doc.replyTo,
-    rateLimit: doc.rateLimit,
-    isDefault: Boolean(doc.isDefault),
-    createdAt: doc.createdAt.toISOString(),
-    updatedAt: doc.updatedAt.toISOString(),
+    id: row.id,
+    name: row.name,
+    host: row.host,
+    port: row.port,
+    secure: row.secure,
+    user: row.username,
+    fromName: row.fromName,
+    fromEmail: row.fromEmail,
+    replyTo: row.replyTo ?? undefined,
+    rateLimit: row.rateLimit,
+    isDefault: row.isDefault,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
   };
 }
 
-export function toTemplate(doc: TemplateDoc): Template {
+export function toTemplate(row: TemplateRow): Template {
   return {
-    id: doc._id!.toString(),
-    name: doc.name,
-    subject: doc.subject,
-    html: doc.html,
-    createdAt: doc.createdAt.toISOString(),
-    updatedAt: doc.updatedAt.toISOString(),
+    id: row.id,
+    name: row.name,
+    subject: row.subject,
+    html: row.html,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
   };
 }
 
 export function toCampaign(
-  doc: CampaignDoc,
+  row: CampaignRow,
+  stats: CampaignStats,
   smtpProfileName?: string
 ): Campaign {
   return {
-    id: doc._id!.toString(),
-    name: doc.name,
-    status: doc.status,
-    sourceLabel: doc.sourceLabel,
-    columns: doc.columns,
-    smtpProfileId: doc.smtpProfileId.toString(),
+    id: row.id,
+    name: row.name,
+    status: row.status as CampaignStatus,
+    sourceLabel: row.sourceLabel,
+    columns: row.columns,
+    smtpProfileId: row.smtpProfileId,
     smtpProfileName,
-    templateId: doc.templateId?.toString(),
-    subject: doc.subject,
-    html: doc.html,
-    mapping: doc.mapping,
-    rateLimit: doc.rateLimit,
-    stats: doc.stats,
-    error: doc.error,
-    createdAt: doc.createdAt.toISOString(),
-    startedAt: doc.startedAt?.toISOString(),
-    finishedAt: doc.finishedAt?.toISOString(),
+    templateId: row.templateId,
+    subject: row.subject,
+    html: row.html,
+    mapping: row.mapping as unknown as Mapping,
+    rateLimit: row.rateLimit,
+    stats,
+    error: row.error,
+    createdAt: row.createdAt.toISOString(),
+    startedAt: row.startedAt?.toISOString() ?? null,
+    finishedAt: row.finishedAt?.toISOString() ?? null,
   };
 }
 
-export function toRecipient(doc: RecipientDoc): Recipient {
+export function toRecipient(row: RecipientRow): Recipient {
   return {
-    id: doc._id!.toString(),
-    index: doc.index,
-    email: doc.email,
-    row: doc.row,
-    status: doc.status,
-    attempts: doc.attempts,
-    error: doc.error,
-    messageId: doc.messageId,
-    sentAt: doc.sentAt?.toISOString(),
+    id: row.id,
+    index: row.index,
+    email: row.email,
+    row: row.row as unknown as Row,
+    status: row.status as RecipientStatus,
+    attempts: row.attempts,
+    error: row.error,
+    messageId: row.messageId,
+    sentAt: row.sentAt?.toISOString() ?? null,
   };
 }

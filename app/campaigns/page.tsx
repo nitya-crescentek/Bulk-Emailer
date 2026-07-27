@@ -7,23 +7,43 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { formatDate } from "@/lib/client";
-import { collections } from "@/lib/mongodb";
+import { prisma } from "@/lib/db";
+import { requireUser } from "@/lib/auth";
 import { toCampaign } from "@/lib/serialize";
-import type { Campaign } from "@/lib/types";
+import type { Campaign, CampaignStats } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+const EMPTY: CampaignStats = { total: 0, sent: 0, failed: 0, pending: 0, skipped: 0 };
+
 export default async function CampaignsPage() {
+  const user = await requireUser();
   let campaigns: Campaign[];
   try {
-    const { campaigns: col, smtp } = await collections();
-    const [docs, profiles] = await Promise.all([
-      col.find().sort({ createdAt: -1 }).limit(100).toArray(),
-      smtp.find().toArray(),
-    ]);
-    const names = new Map(profiles.map((p) => [p._id!.toString(), p.name]));
-    campaigns = docs.map((doc) =>
-      toCampaign(doc, names.get(doc.smtpProfileId.toString()))
+    const docs = await prisma.campaign.findMany({
+      where: { userId: user.id },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      include: { smtpProfile: { select: { name: true } } },
+    });
+
+    const grouped = await prisma.recipient.groupBy({
+      by: ["campaignId", "status"],
+      where: { campaignId: { in: docs.map((c) => c.id) } },
+      _count: { _all: true },
+    });
+    const statsById = new Map<string, CampaignStats>();
+    for (const g of grouped) {
+      const s = statsById.get(g.campaignId) ?? { ...EMPTY };
+      const n = g._count._all;
+      s.total += n;
+      if (g.status === "sending") s.pending += n;
+      else if (g.status in s) s[g.status as keyof CampaignStats] += n;
+      statsById.set(g.campaignId, s);
+    }
+
+    campaigns = docs.map((c) =>
+      toCampaign(c, statsById.get(c.id) ?? EMPTY, c.smtpProfile?.name)
     );
   } catch (err) {
     return (

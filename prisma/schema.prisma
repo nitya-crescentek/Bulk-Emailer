@@ -1,0 +1,202 @@
+// Bulk Mailer — multi-user schema.
+// Connection URL and migration settings live in ../prisma.config.ts.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------- Users ---
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         Role      @default(USER)
+
+  // Null until the email OTP is confirmed.
+  emailVerifiedAt DateTime?
+
+  // Profile / settings.
+  company        String?
+  timezone       String  @default("UTC")
+  defaultRate    Int     @default(30) // default emails/min for new campaigns
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions     Session[]
+  otpCodes     OtpCode[]
+  smtpProfiles SmtpProfile[]
+  templates    Template[]
+  sources      Source[]
+  campaigns    Campaign[]
+
+  @@index([email])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  // SHA-256 of the opaque cookie token; the token itself is never stored.
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userAgent String?
+  ip        String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+enum OtpPurpose {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+model OtpCode {
+  id         String     @id @default(cuid())
+  userId     String
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose    OtpPurpose
+  // Codes are hashed the same way tokens are — never stored in the clear.
+  codeHash   String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  attempts   Int        @default(0)
+  createdAt  DateTime   @default(now())
+
+  @@index([userId, purpose])
+}
+
+// --------------------------------------------------------- Mailer domain ---
+
+model SmtpProfile {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  host      String
+  port      Int      @default(587)
+  secure    Boolean  @default(false)
+  username  String
+  // AES-256-GCM payload — never leaves the server.
+  password  String
+  fromName  String   @default("")
+  fromEmail String
+  replyTo   String?
+  rateLimit Int      @default(30)
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Template {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  subject   String
+  html      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+
+  @@index([userId])
+}
+
+model Source {
+  id       String  @id @default(cuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // "google-sheet" | "csv-url" | "csv-upload"
+  kind     String
+  url      String?
+  fetchUrl String?
+  fileName String?
+  // Raw CSV text, kept so a campaign can be rebuilt without re-importing.
+  csv      String
+  columns  String[]
+  rowCount Int
+  createdAt DateTime @default(now())
+
+  campaigns Campaign[]
+
+  @@index([userId])
+}
+
+model Campaign {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name   String
+  // "draft" | "sending" | "paused" | "completed" | "failed"
+  status String @default("draft")
+
+  // Sources/templates/profiles can be deleted without dropping the campaign.
+  sourceId    String?
+  source      Source? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  sourceLabel String
+  columns     String[]
+
+  smtpProfileId String?
+  smtpProfile   SmtpProfile? @relation(fields: [smtpProfileId], references: [id], onDelete: SetNull)
+
+  templateId String?
+  template   Template? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  // Snapshot of the copy at creation time.
+  subject String
+  html    String
+  // Mapping (email column, cc/bcc, variable bindings).
+  mapping Json
+  rateLimit Int
+  error   String?
+
+  createdAt  DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  recipients Recipient[]
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Recipient {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  // Position in the source file, 1-based, for stable ordering.
+  index      Int
+  email      String
+  row        Json
+  cc         String?
+  bcc        String?
+  // "pending" | "sending" | "sent" | "failed" | "skipped"
+  status     String   @default("pending")
+  attempts   Int      @default(0)
+  error      String?
+  messageId  String?
+  sentAt     DateTime?
+
+  @@index([campaignId, status])
+  @@index([campaignId, index])
+}

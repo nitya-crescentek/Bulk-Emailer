@@ -3,59 +3,70 @@ import {
   clampRate,
   handle,
   HttpError,
+  requireId,
   requireString,
-  toObjectId,
 } from "@/lib/http";
-import { collections } from "@/lib/mongodb";
+import { prisma } from "@/lib/db";
+import { requireApiUser } from "@/lib/auth";
 import { toSmtpProfile } from "@/lib/serialize";
-import type { SmtpProfileDoc } from "@/lib/types";
+import { isUniqueViolation } from "../route";
+import type { Prisma } from "@/generated/prisma/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function PUT(
-  request: Request,
-  ctx: RouteContext<"/api/smtp/[id]">
-) {
+export async function PUT(request: Request, ctx: RouteContext<"/api/smtp/[id]">) {
   return handle(async () => {
+    const user = await requireApiUser();
     const { id } = await ctx.params;
-    const _id = toObjectId(id);
+    requireId(id);
     const body = await request.json();
-    const { smtp } = await collections();
 
-    const update: Partial<SmtpProfileDoc> = {
-      name: requireString(body.name, "Profile name", { max: 120 }),
+    // Scope the update to this user's own profile.
+    const existing = await prisma.smtpProfile.findFirst({
+      where: { id, userId: user.id },
+    });
+    if (!existing) throw new HttpError(404, "SMTP profile not found.");
+
+    const name = requireString(body.name, "Profile name", { max: 120 });
+    const isDefault = Boolean(body.isDefault);
+
+    const data: Prisma.SmtpProfileUpdateInput = {
+      name,
       host: requireString(body.host, "SMTP host", { max: 255 }),
       port: Number(body.port) || 587,
       secure: Boolean(body.secure),
-      user: requireString(body.user, "SMTP username", { max: 255 }),
+      username: requireString(body.user, "SMTP username", { max: 255 }),
       fromName: typeof body.fromName === "string" ? body.fromName.trim() : "",
       fromEmail: requireString(body.fromEmail, "From address", { max: 255 }),
       replyTo:
         typeof body.replyTo === "string" && body.replyTo.trim()
           ? body.replyTo.trim()
-          : undefined,
+          : null,
       rateLimit: clampRate(body.rateLimit),
-      isDefault: Boolean(body.isDefault),
-      updatedAt: new Date(),
+      isDefault,
     };
-
     // A blank password field means "keep the stored one".
     if (typeof body.password === "string" && body.password !== "") {
-      update.password = encrypt(body.password);
+      data.password = encrypt(body.password);
     }
 
-    if (update.isDefault) {
-      await smtp.updateMany({ _id: { $ne: _id } }, { $set: { isDefault: false } });
+    if (isDefault) {
+      await prisma.smtpProfile.updateMany({
+        where: { userId: user.id, id: { not: id } },
+        data: { isDefault: false },
+      });
     }
 
-    const doc = await smtp.findOneAndUpdate(
-      { _id },
-      { $set: update },
-      { returnDocument: "after" }
-    );
-    if (!doc) throw new HttpError(404, "SMTP profile not found.");
-    return { profile: toSmtpProfile(doc) };
+    try {
+      const row = await prisma.smtpProfile.update({ where: { id }, data });
+      return { profile: toSmtpProfile(row) };
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        throw new HttpError(409, `You already have a profile named "${name}".`);
+      }
+      throw err;
+    }
   });
 }
 
@@ -64,13 +75,17 @@ export async function DELETE(
   ctx: RouteContext<"/api/smtp/[id]">
 ) {
   return handle(async () => {
+    const user = await requireApiUser();
     const { id } = await ctx.params;
-    const _id = toObjectId(id);
-    const { smtp, campaigns } = await collections();
+    requireId(id);
 
-    const inUse = await campaigns.countDocuments({
-      smtpProfileId: _id,
-      status: { $in: ["sending", "paused"] },
+    const existing = await prisma.smtpProfile.findFirst({
+      where: { id, userId: user.id },
+    });
+    if (!existing) throw new HttpError(404, "SMTP profile not found.");
+
+    const inUse = await prisma.campaign.count({
+      where: { smtpProfileId: id, status: { in: ["sending", "paused"] } },
     });
     if (inUse > 0) {
       throw new HttpError(
@@ -79,10 +94,7 @@ export async function DELETE(
       );
     }
 
-    const result = await smtp.deleteOne({ _id });
-    if (result.deletedCount === 0) {
-      throw new HttpError(404, "SMTP profile not found.");
-    }
+    await prisma.smtpProfile.delete({ where: { id } });
     return { ok: true };
   });
 }

@@ -1,12 +1,15 @@
-import { handle, HttpError, toObjectId } from "@/lib/http";
+import { handle, HttpError, requireId } from "@/lib/http";
+import { prisma } from "@/lib/db";
+import { requireApiUser } from "@/lib/auth";
+import { decrypt } from "@/lib/crypto";
 import {
+  createTransport,
   describeMailError,
   fromAddress,
-  transportForProfile,
 } from "@/lib/mailer";
-import { collections } from "@/lib/mongodb";
 import { isEmail } from "@/lib/source";
 import { buildContext, htmlToText, render } from "@/lib/template";
+import type { Mapping, Row } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,29 +23,46 @@ export async function POST(
   ctx: RouteContext<"/api/campaigns/[id]/test">
 ) {
   return handle(async () => {
+    const user = await requireApiUser();
     const { id } = await ctx.params;
-    const campaignId = toObjectId(id);
+    requireId(id);
     const body = await request.json();
 
     const to = typeof body.to === "string" ? body.to.trim() : "";
     if (!isEmail(to)) throw new HttpError(400, "Enter a valid address to test with.");
 
-    const { campaigns, recipients, smtp } = await collections();
-    const campaign = await campaigns.findOne({ _id: campaignId });
+    const campaign = await prisma.campaign.findFirst({
+      where: { id, userId: user.id },
+    });
     if (!campaign) throw new HttpError(404, "Campaign not found.");
+    if (!campaign.smtpProfileId) {
+      throw new HttpError(400, "This campaign has no SMTP profile.");
+    }
 
-    const profile = await smtp.findOne({ _id: campaign.smtpProfileId });
+    const profile = await prisma.smtpProfile.findUnique({
+      where: { id: campaign.smtpProfileId },
+    });
     if (!profile) throw new HttpError(400, "The SMTP profile for this campaign is missing.");
 
     const index = Number(body.index) || 1;
     const recipient =
-      (await recipients.findOne({ campaignId, index })) ??
-      (await recipients.findOne({ campaignId }, { sort: { index: 1 } }));
+      (await prisma.recipient.findFirst({ where: { campaignId: id, index } })) ??
+      (await prisma.recipient.findFirst({
+        where: { campaignId: id },
+        orderBy: { index: "asc" },
+      }));
     if (!recipient) throw new HttpError(400, "This campaign has no recipients.");
 
-    const context = buildContext(recipient.row, campaign.mapping);
+    const mapping = campaign.mapping as unknown as Mapping;
+    const context = buildContext(recipient.row as unknown as Row, mapping);
     const html = render(campaign.html, context, { escape: true });
-    const transport = transportForProfile(profile);
+    const transport = createTransport({
+      host: profile.host,
+      port: profile.port,
+      secure: profile.secure,
+      user: profile.username,
+      password: decrypt(profile.password),
+    });
 
     try {
       const info = await transport.sendMail({

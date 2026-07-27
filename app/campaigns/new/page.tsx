@@ -1,21 +1,28 @@
 import { CampaignWizard } from "@/components/campaigns/campaign-wizard";
 import { ConnectionError, toErrorMessage } from "@/components/connection-error";
 import { PageHeader } from "@/components/page-header";
-import { collections } from "@/lib/mongodb";
+import { prisma } from "@/lib/db";
+import { requireUser } from "@/lib/auth";
 import { toSmtpProfile, toTemplate } from "@/lib/serialize";
 import type { SmtpProfile, Template } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function NewCampaignPage() {
+  const user = await requireUser();
   let profiles: SmtpProfile[];
   let templates: Template[];
 
   try {
-    const { smtp, templates: templateCol } = await collections();
     const [smtpDocs, templateDocs] = await Promise.all([
-      smtp.find().sort({ name: 1 }).toArray(),
-      templateCol.find().sort({ updatedAt: -1 }).toArray(),
+      prisma.smtpProfile.findMany({
+        where: { userId: user.id },
+        orderBy: { name: "asc" },
+      }),
+      prisma.template.findMany({
+        where: { userId: user.id },
+        orderBy: { updatedAt: "desc" },
+      }),
     ]);
     profiles = smtpDocs.map(toSmtpProfile);
     templates = templateDocs.map(toTemplate);

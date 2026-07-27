@@ -1,5 +1,4 @@
-import { ObjectId } from "mongodb";
-import { collections } from "./mongodb";
+import { prisma } from "./db";
 import { HttpError } from "./http";
 import {
   describeMailError,
@@ -8,14 +7,15 @@ import {
   transportForProfile,
 } from "./mailer";
 import { buildContext, htmlToText, render } from "./template";
-import type { CampaignDoc, CampaignStats, SmtpProfileDoc } from "./types";
+import type { CampaignStats, Mapping, Row } from "./types";
+import type { Campaign, SmtpProfile } from "@/generated/prisma/client";
 
 interface Control {
   stop: boolean;
 }
 
-// Runs live in the Node process, so they survive between requests but not
-// between restarts. `finalize()` requeues anything a restart interrupted.
+// Runners live in the Node process, so they survive between requests but not a
+// restart. `finalize()` requeues anything a restart interrupted.
 const globalForRunner = globalThis as unknown as {
   _campaignRunners?: Map<string, Control>;
 };
@@ -34,37 +34,26 @@ export function requestStop(campaignId: string): boolean {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const EMPTY_STATS: CampaignStats = {
-  total: 0,
-  sent: 0,
-  failed: 0,
-  pending: 0,
-  skipped: 0,
-};
+export async function recomputeStats(campaignId: string): Promise<CampaignStats> {
+  const grouped = await prisma.recipient.groupBy({
+    by: ["status"],
+    where: { campaignId },
+    _count: { _all: true },
+  });
 
-export async function recomputeStats(
-  campaignId: ObjectId
-): Promise<CampaignStats> {
-  const { recipients } = await collections();
-  const grouped = await recipients
-    .aggregate<{ _id: string; count: number }>([
-      { $match: { campaignId } },
-      { $group: { _id: "$status", count: { $sum: 1 } } },
-    ])
-    .toArray();
-
-  const stats = { ...EMPTY_STATS };
-  for (const { _id, count } of grouped) {
+  const stats: CampaignStats = { total: 0, sent: 0, failed: 0, pending: 0, skipped: 0 };
+  for (const g of grouped) {
+    const count = g._count._all;
     stats.total += count;
-    // An interrupted claim is still work to do.
-    if (_id === "sending") stats.pending += count;
-    else if (_id in stats) stats[_id as keyof CampaignStats] += count;
+    // An interrupted claim ("sending") is still work to do.
+    if (g.status === "sending") stats.pending += count;
+    else if (g.status in stats) stats[g.status as keyof CampaignStats] += count;
   }
   return stats;
 }
 
 /**
- * Kicks off (or resumes) a campaign. Returns as soon as the background loop is
+ * Kicks off (or resumes) a campaign. Returns once the background loop is
  * scheduled — poll `GET /api/campaigns/:id` for progress.
  */
 export async function startCampaign(campaignId: string): Promise<void> {
@@ -72,25 +61,27 @@ export async function startCampaign(campaignId: string): Promise<void> {
     throw new HttpError(409, "This campaign is already sending.");
   }
 
-  const { campaigns, recipients, smtp } = await collections();
-  const _id = new ObjectId(campaignId);
-  const campaign = await campaigns.findOne({ _id });
+  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
   if (!campaign) throw new HttpError(404, "Campaign not found.");
 
-  const profile = await smtp.findOne({ _id: campaign.smtpProfileId });
+  if (!campaign.smtpProfileId) {
+    throw new HttpError(400, "This campaign has no SMTP profile.");
+  }
+  const profile = await prisma.smtpProfile.findUnique({
+    where: { id: campaign.smtpProfileId },
+  });
   if (!profile) {
     throw new HttpError(400, "The SMTP profile for this campaign no longer exists.");
   }
 
   // Reclaim rows left in-flight by a restart or crash.
-  await recipients.updateMany(
-    { campaignId: _id, status: "sending" },
-    { $set: { status: "pending" } }
-  );
+  await prisma.recipient.updateMany({
+    where: { campaignId, status: "sending" },
+    data: { status: "pending" },
+  });
 
-  const pending = await recipients.countDocuments({
-    campaignId: _id,
-    status: "pending",
+  const pending = await prisma.recipient.count({
+    where: { campaignId, status: "pending" },
   });
   if (pending === 0) {
     throw new HttpError(400, "There is nothing left to send in this campaign.");
@@ -99,38 +90,57 @@ export async function startCampaign(campaignId: string): Promise<void> {
   const control: Control = { stop: false };
   runners.set(campaignId, control);
 
-  await campaigns.updateOne(
-    { _id },
-    {
-      $set: { status: "sending", startedAt: campaign.startedAt ?? new Date() },
-      $unset: { finishedAt: "", error: "" },
-    }
-  );
+  await prisma.campaign.update({
+    where: { id: campaignId },
+    data: {
+      status: "sending",
+      startedAt: campaign.startedAt ?? new Date(),
+      finishedAt: null,
+      error: null,
+    },
+  });
 
   void run(campaign, profile, control)
     .catch(async (err) => {
       console.error("[sender] campaign crashed", err);
-      await campaigns.updateOne(
-        { _id },
-        {
-          $set: {
+      await prisma.campaign
+        .update({
+          where: { id: campaignId },
+          data: {
             status: "failed",
             error: err instanceof Error ? err.message : String(err),
             finishedAt: new Date(),
           },
-        }
-      );
+        })
+        .catch(() => {});
     })
     .finally(() => runners.delete(campaignId));
 }
 
+/** Atomically claims the next queued recipient (FOR UPDATE SKIP LOCKED). */
+async function claimNext(campaignId: string): Promise<string | null> {
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    UPDATE "Recipient"
+    SET status = 'sending', attempts = attempts + 1
+    WHERE id = (
+      SELECT id FROM "Recipient"
+      WHERE "campaignId" = ${campaignId} AND status = 'pending'
+      ORDER BY "index" ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    RETURNING id;
+  `;
+  return rows[0]?.id ?? null;
+}
+
 async function run(
-  campaign: CampaignDoc,
-  profile: SmtpProfileDoc,
+  campaign: Campaign,
+  profile: SmtpProfile,
   control: Control
 ): Promise<void> {
-  const campaignId = campaign._id!;
-  const { campaigns, recipients } = await collections();
+  const campaignId = campaign.id;
+  const mapping = campaign.mapping as unknown as Mapping;
   const transport = transportForProfile(profile);
   const from = fromAddress(profile);
   const gap = Math.round(60_000 / Math.max(1, campaign.rateLimit));
@@ -141,14 +151,13 @@ async function run(
     await transport.verify();
 
     while (!control.stop) {
-      const recipient = await recipients.findOneAndUpdate(
-        { campaignId, status: "pending" },
-        { $set: { status: "sending" }, $inc: { attempts: 1 } },
-        { sort: { index: 1 }, returnDocument: "after" }
-      );
-      if (!recipient) break;
+      const id = await claimNext(campaignId);
+      if (!id) break;
 
-      const context = buildContext(recipient.row, campaign.mapping);
+      const recipient = await prisma.recipient.findUnique({ where: { id } });
+      if (!recipient) continue;
+
+      const context = buildContext(recipient.row as unknown as Row, mapping);
       const html = render(campaign.html, context, { escape: true });
 
       try {
@@ -163,38 +172,30 @@ async function run(
           text: htmlToText(html),
         });
 
-        await recipients.updateOne(
-          { _id: recipient._id },
-          {
-            $set: {
-              status: "sent",
-              sentAt: new Date(),
-              messageId: info.messageId,
-            },
-            $unset: { error: "" },
-          }
-        );
+        await prisma.recipient.update({
+          where: { id },
+          data: {
+            status: "sent",
+            sentAt: new Date(),
+            messageId: info.messageId,
+            error: null,
+          },
+        });
       } catch (err) {
         if (isFatalMailError(err)) {
           // Not this recipient's fault — put it back and stop the run.
-          await recipients.updateOne(
-            { _id: recipient._id },
-            { $set: { status: "pending" } }
-          );
+          await prisma.recipient.update({
+            where: { id },
+            data: { status: "pending" },
+          });
           fatalError = describeMailError(err);
           break;
         }
-        await recipients.updateOne(
-          { _id: recipient._id },
-          { $set: { status: "failed", error: describeMailError(err) } }
-        );
+        await prisma.recipient.update({
+          where: { id },
+          data: { status: "failed", error: describeMailError(err) },
+        });
       }
-
-      // Keep the UI's counters moving without an aggregation per message.
-      await campaigns.updateOne(
-        { _id: campaignId },
-        { $set: { stats: await recomputeStats(campaignId) } }
-      );
 
       if (gap > 0 && !control.stop) await sleep(gap);
     }
@@ -208,51 +209,38 @@ async function run(
 }
 
 async function finalize(
-  campaignId: ObjectId,
+  campaignId: string,
   stopped: boolean,
   fatalError?: string
 ): Promise<void> {
-  const { campaigns, recipients } = await collections();
-  await recipients.updateMany(
-    { campaignId, status: "sending" },
-    { $set: { status: "pending" } }
-  );
+  await prisma.recipient.updateMany({
+    where: { campaignId, status: "sending" },
+    data: { status: "pending" },
+  });
 
   const stats = await recomputeStats(campaignId);
   const status = fatalError
     ? "failed"
-    : stopped
+    : stopped || stats.pending > 0
       ? "paused"
-      : stats.pending > 0
-        ? "paused"
-        : "completed";
+      : "completed";
 
-  await campaigns.updateOne(
-    { _id: campaignId },
-    {
-      $set: {
-        stats,
-        status,
-        ...(fatalError ? { error: fatalError } : {}),
-        ...(status === "completed" || status === "failed"
-          ? { finishedAt: new Date() }
-          : {}),
-      },
-      ...(fatalError ? {} : { $unset: { error: "" } }),
-    }
-  );
+  await prisma.campaign.update({
+    where: { id: campaignId },
+    data: {
+      status,
+      error: fatalError ?? null,
+      finishedAt:
+        status === "completed" || status === "failed" ? new Date() : null,
+    },
+  });
 }
 
 /** Moves failed rows back into the queue so they can be retried. */
-export async function requeueFailed(campaignId: ObjectId): Promise<number> {
-  const { campaigns, recipients } = await collections();
-  const result = await recipients.updateMany(
-    { campaignId, status: "failed" },
-    { $set: { status: "pending" }, $unset: { error: "" } }
-  );
-  await campaigns.updateOne(
-    { _id: campaignId },
-    { $set: { stats: await recomputeStats(campaignId) } }
-  );
-  return result.modifiedCount;
+export async function requeueFailed(campaignId: string): Promise<number> {
+  const result = await prisma.recipient.updateMany({
+    where: { campaignId, status: "failed" },
+    data: { status: "pending", error: null },
+  });
+  return result.count;
 }

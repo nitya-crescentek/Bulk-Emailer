@@ -1,5 +1,6 @@
-import { handle, HttpError, toObjectId } from "@/lib/http";
-import { collections } from "@/lib/mongodb";
+import { handle, HttpError, requireId } from "@/lib/http";
+import { prisma } from "@/lib/db";
+import { requireApiUser } from "@/lib/auth";
 import { toCampaign } from "@/lib/serialize";
 import { isRunning, recomputeStats } from "@/lib/sender";
 
@@ -11,18 +12,19 @@ export async function GET(
   ctx: RouteContext<"/api/campaigns/[id]">
 ) {
   return handle(async () => {
+    const user = await requireApiUser();
     const { id } = await ctx.params;
-    const _id = toObjectId(id);
-    const { campaigns, smtp } = await collections();
+    requireId(id);
 
-    const doc = await campaigns.findOne({ _id });
+    const doc = await prisma.campaign.findFirst({
+      where: { id, userId: user.id },
+      include: { smtpProfile: { select: { name: true } } },
+    });
     if (!doc) throw new HttpError(404, "Campaign not found.");
 
-    const profile = await smtp.findOne({ _id: doc.smtpProfileId });
-    const stats = await recomputeStats(_id);
-
+    const stats = await recomputeStats(id);
     return {
-      campaign: toCampaign({ ...doc, stats }, profile?.name),
+      campaign: toCampaign(doc, stats, doc.smtpProfile?.name),
       running: isRunning(id),
     };
   });
@@ -33,16 +35,16 @@ export async function DELETE(
   ctx: RouteContext<"/api/campaigns/[id]">
 ) {
   return handle(async () => {
+    const user = await requireApiUser();
     const { id } = await ctx.params;
+    requireId(id);
+
     if (isRunning(id)) {
       throw new HttpError(409, "Pause the campaign before deleting it.");
     }
-    const _id = toObjectId(id);
-    const { campaigns, recipients } = await collections();
-
-    const result = await campaigns.deleteOne({ _id });
-    if (result.deletedCount === 0) throw new HttpError(404, "Campaign not found.");
-    await recipients.deleteMany({ campaignId: _id });
+    // Recipients cascade via the schema relation.
+    const result = await prisma.campaign.deleteMany({ where: { id, userId: user.id } });
+    if (result.count === 0) throw new HttpError(404, "Campaign not found.");
     return { ok: true };
   });
 }

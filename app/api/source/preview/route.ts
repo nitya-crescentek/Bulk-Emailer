@@ -1,12 +1,8 @@
 import { handle, HttpError } from "@/lib/http";
-import { collections } from "@/lib/mongodb";
+import { prisma } from "@/lib/db";
+import { requireApiUser } from "@/lib/auth";
 import { fetchCsv, isEmail, parseCsv, resolveSourceUrl } from "@/lib/source";
-import type {
-  ColumnEmailStats,
-  Row,
-  SourceDoc,
-  SourcePreview,
-} from "@/lib/types";
+import type { ColumnEmailStats, Row, SourceKind, SourcePreview } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,9 +18,15 @@ const PREVIEW_ROWS = 10;
  */
 export async function POST(request: Request) {
   return handle(async (): Promise<SourcePreview> => {
+    const user = await requireApiUser();
     const contentType = request.headers.get("content-type") ?? "";
-    let doc: Omit<SourceDoc, "_id" | "columns" | "rowCount" | "createdAt">;
+
+    let kind: SourceKind;
+    let csv: string;
     let label: string;
+    let url: string | null = null;
+    let fetchUrl: string | null = null;
+    let fileName: string | null = null;
 
     if (contentType.includes("multipart/form-data")) {
       const form = await request.formData();
@@ -35,7 +37,9 @@ export async function POST(request: Request) {
         throw new HttpError(400, "That file is larger than 15 MB.");
       }
       label = file.name || "upload.csv";
-      doc = { kind: "csv-upload", fileName: label, csv: await file.text() };
+      fileName = label;
+      kind = "csv-upload";
+      csv = await file.text();
     } else {
       const body = await request.json();
       if (typeof body.url !== "string" || !body.url.trim()) {
@@ -43,30 +47,33 @@ export async function POST(request: Request) {
       }
       const resolved = resolveSourceUrl(body.url);
       label = resolved.label;
-      doc = {
-        kind: resolved.kind,
-        url: body.url.trim(),
-        fetchUrl: resolved.fetchUrl,
-        csv: await fetchCsv(resolved.fetchUrl),
-      };
+      kind = resolved.kind;
+      url = body.url.trim();
+      fetchUrl = resolved.fetchUrl;
+      csv = await fetchCsv(resolved.fetchUrl);
     }
 
-    const { columns, rows } = parseCsv(doc.csv);
+    const { columns, rows } = parseCsv(csv);
     if (rows.length === 0) {
       throw new HttpError(400, "The source has a header row but no data rows.");
     }
 
-    const { sources } = await collections();
-    const { insertedId } = await sources.insertOne({
-      ...doc,
-      columns,
-      rowCount: rows.length,
-      createdAt: new Date(),
+    const source = await prisma.source.create({
+      data: {
+        userId: user.id,
+        kind,
+        url,
+        fetchUrl,
+        fileName,
+        csv,
+        columns,
+        rowCount: rows.length,
+      },
     });
 
     return {
-      sourceId: insertedId.toString(),
-      kind: doc.kind,
+      sourceId: source.id,
+      kind,
       label,
       columns,
       rows: rows.slice(0, PREVIEW_ROWS),

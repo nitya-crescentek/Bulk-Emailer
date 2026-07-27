@@ -1,6 +1,6 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { decrypt } from "./crypto";
-import type { SmtpProfileDoc } from "./types";
+import type { SmtpProfile } from "@/generated/prisma/client";
 
 export interface SmtpCredentials {
   host: string;
@@ -25,12 +25,13 @@ export function createTransport(creds: SmtpCredentials): Transporter {
   });
 }
 
-export function transportForProfile(profile: SmtpProfileDoc): Transporter {
+/** Builds a transport from a stored profile, decrypting the password. */
+export function transportForProfile(profile: SmtpProfile): Transporter {
   return createTransport({
     host: profile.host,
     port: profile.port,
     secure: profile.secure,
-    user: profile.user,
+    user: profile.username,
     password: decrypt(profile.password),
   });
 }

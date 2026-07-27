@@ -5,7 +5,8 @@ import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatDate } from "@/lib/client";
-import { collections } from "@/lib/mongodb";
+import { prisma } from "@/lib/db";
+import { requireUser } from "@/lib/auth";
 import { toTemplate } from "@/lib/serialize";
 import { extractVariables } from "@/lib/template";
 import type { Template } from "@/lib/types";
@@ -13,10 +14,13 @@ import type { Template } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 export default async function TemplatesPage() {
+  const user = await requireUser();
   let templates: Template[];
   try {
-    const { templates: col } = await collections();
-    const docs = await col.find().sort({ updatedAt: -1 }).toArray();
+    const docs = await prisma.template.findMany({
+      where: { userId: user.id },
+      orderBy: { updatedAt: "desc" },
+    });
     templates = docs.map(toTemplate);
   } catch (err) {
     return (

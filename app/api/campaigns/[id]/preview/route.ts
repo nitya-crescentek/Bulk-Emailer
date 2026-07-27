@@ -1,6 +1,8 @@
-import { handle, HttpError, toObjectId } from "@/lib/http";
-import { collections } from "@/lib/mongodb";
+import { handle, HttpError, requireId } from "@/lib/http";
+import { prisma } from "@/lib/db";
+import { requireApiUser } from "@/lib/auth";
 import { buildContext, missingVariables, render } from "@/lib/template";
+import type { Mapping, Row } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,20 +13,26 @@ export async function GET(
   ctx: RouteContext<"/api/campaigns/[id]/preview">
 ) {
   return handle(async () => {
+    const user = await requireApiUser();
     const { id } = await ctx.params;
-    const campaignId = toObjectId(id);
+    requireId(id);
     const index = Math.max(1, Number(new URL(request.url).searchParams.get("index")) || 1);
 
-    const { campaigns, recipients } = await collections();
-    const campaign = await campaigns.findOne({ _id: campaignId });
+    const campaign = await prisma.campaign.findFirst({
+      where: { id, userId: user.id },
+    });
     if (!campaign) throw new HttpError(404, "Campaign not found.");
 
     const recipient =
-      (await recipients.findOne({ campaignId, index })) ??
-      (await recipients.findOne({ campaignId }, { sort: { index: 1 } }));
+      (await prisma.recipient.findFirst({ where: { campaignId: id, index } })) ??
+      (await prisma.recipient.findFirst({
+        where: { campaignId: id },
+        orderBy: { index: "asc" },
+      }));
     if (!recipient) throw new HttpError(404, "This campaign has no recipients.");
 
-    const context = buildContext(recipient.row, campaign.mapping);
+    const mapping = campaign.mapping as unknown as Mapping;
+    const context = buildContext(recipient.row as unknown as Row, mapping);
     const html = render(campaign.html, context, { escape: true });
     const subject = render(campaign.subject, context);
 

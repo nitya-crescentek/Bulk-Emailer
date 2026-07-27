@@ -17,40 +17,62 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { collections } from "@/lib/mongodb";
+import { prisma } from "@/lib/db";
+import { requireUser } from "@/lib/auth";
 import { toCampaign } from "@/lib/serialize";
 import { formatDate } from "@/lib/client";
+import type { CampaignStats } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-async function loadDashboard() {
-  const { campaigns, templates, smtp } = await collections();
+const EMPTY: CampaignStats = { total: 0, sent: 0, failed: 0, pending: 0, skipped: 0 };
+
+async function loadDashboard(userId: string) {
   const [recent, campaignCount, templateCount, smtpCount, sentAgg] =
     await Promise.all([
-      campaigns.find().sort({ createdAt: -1 }).limit(5).toArray(),
-      campaigns.countDocuments(),
-      templates.countDocuments(),
-      smtp.countDocuments(),
-      campaigns
-        .aggregate<{ total: number }>([
-          { $group: { _id: null, total: { $sum: "$stats.sent" } } },
-        ])
-        .toArray(),
+      prisma.campaign.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        take: 5,
+      }),
+      prisma.campaign.count({ where: { userId } }),
+      prisma.template.count({ where: { userId } }),
+      prisma.smtpProfile.count({ where: { userId } }),
+      prisma.recipient.count({
+        where: { status: "sent", campaign: { userId } },
+      }),
     ]);
 
+  // Counters for the five recent campaigns in one grouped query.
+  const grouped = await prisma.recipient.groupBy({
+    by: ["campaignId", "status"],
+    where: { campaignId: { in: recent.map((c) => c.id) } },
+    _count: { _all: true },
+  });
+  const statsById = new Map<string, CampaignStats>();
+  for (const g of grouped) {
+    const s = statsById.get(g.campaignId) ?? { ...EMPTY };
+    const n = g._count._all;
+    s.total += n;
+    if (g.status === "sending") s.pending += n;
+    else if (g.status in s) s[g.status as keyof CampaignStats] += n;
+    statsById.set(g.campaignId, s);
+  }
+
   return {
-    recent: recent.map((doc) => toCampaign(doc)),
+    recent: recent.map((c) => toCampaign(c, statsById.get(c.id) ?? EMPTY)),
     campaignCount,
     templateCount,
     smtpCount,
-    totalSent: sentAgg[0]?.total ?? 0,
+    totalSent: sentAgg,
   };
 }
 
 export default async function DashboardPage() {
+  const user = await requireUser();
   let data: Awaited<ReturnType<typeof loadDashboard>>;
   try {
-    data = await loadDashboard();
+    data = await loadDashboard(user.id);
   } catch (err) {
     return (
       <>
