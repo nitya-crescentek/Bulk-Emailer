@@ -3,12 +3,29 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { ArrowLeftIcon, ArrowRightIcon, CheckIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  CheckIcon,
+  SaveIcon,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { api, errorMessage } from "@/lib/client";
-import { STARTER_TEMPLATE } from "@/lib/template";
+import {
+  blankDesign,
+  isEmailDesign,
+  renderDesign,
+  type EmailDesign,
+} from "@/lib/email-design";
 import { cn } from "@/lib/utils";
-import type { Campaign, SmtpProfile, Template } from "@/lib/types";
+import type { Campaign, SmtpProfile, SourcePreview, Template } from "@/lib/types";
 import { StepContent } from "./step-content";
 import { StepMapping } from "./step-mapping";
 import { StepSend } from "./step-send";
@@ -20,24 +37,46 @@ const STEPS = ["Data source", "Email", "Mapping", "Send"] as const;
 export function CampaignWizard({
   profiles,
   templates,
+  campaign,
+  sourcePreview,
 }: {
   profiles: SmtpProfile[];
   templates: Template[];
+  /** When present, the wizard edits this campaign instead of creating one. */
+  campaign?: Campaign;
+  sourcePreview?: SourcePreview | null;
 }) {
   const router = useRouter();
+  const isEdit = !!campaign;
+  // Copy is always editable; the recipient-shaping steps only when it's a draft.
+  const contentOnly = isEdit && campaign!.status !== "draft";
+
   const [step, setStep] = useState(0);
-  const [creating, setCreating] = useState(false);
-  const [state, setState] = useState<WizardState>({
-    source: null,
-    templateId: "",
-    subject: "A quick proposal for {{Company}}",
-    html: STARTER_TEMPLATE,
-    mapping: { email: "", variables: {} },
-    name: "",
-    smtpProfileId: profiles.find((p) => p.isDefault)?.id ?? profiles[0]?.id ?? "",
-    rateLimit:
-      profiles.find((p) => p.isDefault)?.rateLimit ?? profiles[0]?.rateLimit ?? 30,
-    dedupe: true,
+  const [saving, setSaving] = useState(false);
+  const [state, setState] = useState<WizardState>(() => {
+    if (campaign) {
+      return initialFromCampaign(campaign, sourcePreview ?? null, profiles);
+    }
+    // Start on a blank canvas in the visual builder, with the effective HTML
+    // rendered from it so the preview and mapping stay in sync from the start.
+    const design = blankDesign();
+    return {
+      source: null,
+      templateId: "",
+      subject: "A quick proposal for {{Company}}",
+      html: renderDesign(design),
+      design,
+      editorMode: "visual" as const,
+      mapping: { email: "", variables: {} },
+      name: "",
+      smtpProfileId:
+        profiles.find((p) => p.isDefault)?.id ?? profiles[0]?.id ?? "",
+      rateLimit:
+        profiles.find((p) => p.isDefault)?.rateLimit ??
+        profiles[0]?.rateLimit ??
+        30,
+      dedupe: true,
+    };
   });
 
   const patch = (update: Partial<WizardState>) =>
@@ -45,29 +84,105 @@ export function CampaignWizard({
 
   const blocker = validate(state, step);
 
-  async function create() {
-    setCreating(true);
+  function contentPayload() {
+    return {
+      name: state.name,
+      subject: state.subject,
+      html: state.html,
+      design: state.design,
+      editorMode: state.editorMode,
+      templateId: state.templateId || undefined,
+    };
+  }
+
+  async function submit() {
+    setSaving(true);
     try {
-      const { campaign } = await api<{ campaign: Campaign }>("/api/campaigns", {
-        method: "POST",
-        body: JSON.stringify({
-          name: state.name,
-          sourceId: state.source!.sourceId,
-          smtpProfileId: state.smtpProfileId,
-          templateId: state.templateId || undefined,
-          subject: state.subject,
-          html: state.html,
-          mapping: state.mapping,
-          rateLimit: state.rateLimit,
-          dedupe: state.dedupe,
-        }),
-      });
-      toast.success("Campaign created");
-      router.push(`/campaigns/${campaign.id}`);
+      if (isEdit) {
+        const body = contentOnly
+          ? contentPayload()
+          : {
+              ...contentPayload(),
+              sourceId: state.source!.sourceId,
+              smtpProfileId: state.smtpProfileId,
+              mapping: state.mapping,
+              rateLimit: state.rateLimit,
+              dedupe: state.dedupe,
+            };
+        await api(`/api/campaigns/${campaign!.id}`, {
+          method: "PUT",
+          body: JSON.stringify(body),
+        });
+        toast.success("Campaign updated");
+        router.push(`/campaigns/${campaign!.id}`);
+        router.refresh();
+      } else {
+        const { campaign: created } = await api<{ campaign: Campaign }>(
+          "/api/campaigns",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              ...contentPayload(),
+              sourceId: state.source!.sourceId,
+              smtpProfileId: state.smtpProfileId,
+              mapping: state.mapping,
+              rateLimit: state.rateLimit,
+              dedupe: state.dedupe,
+            }),
+          }
+        );
+        toast.success("Campaign created");
+        router.push(`/campaigns/${created.id}`);
+      }
     } catch (err) {
       toast.error(errorMessage(err));
-      setCreating(false);
+      setSaving(false);
     }
+  }
+
+  // A finished campaign only exposes the copy — no stepper, just edit + save.
+  if (contentOnly) {
+    const contentBlocker = !state.name.trim()
+      ? "Name the campaign."
+      : !state.subject.trim()
+        ? "Add a subject line."
+        : !state.html.trim()
+          ? "Write the email body."
+          : undefined;
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>Campaign name</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Input
+              value={state.name}
+              onChange={(e) => patch({ name: e.target.value })}
+              placeholder="Q3 outreach"
+            />
+          </CardContent>
+        </Card>
+
+        <StepContent state={state} patch={patch} templates={templates} />
+
+        <div className="flex items-center gap-2 border-t pt-4">
+          <Button onClick={submit} disabled={Boolean(contentBlocker) || saving}>
+            <SaveIcon />
+            {saving ? "Saving…" : "Save changes"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => router.push(`/campaigns/${campaign!.id}`)}
+          >
+            Cancel
+          </Button>
+          {contentBlocker ? (
+            <p className="text-sm text-muted-foreground">{contentBlocker}</p>
+          ) : null}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -133,9 +248,15 @@ export function CampaignWizard({
             <ArrowRightIcon />
           </Button>
         ) : (
-          <Button onClick={create} disabled={Boolean(blocker) || creating}>
-            <CheckIcon />
-            {creating ? "Creating…" : "Create campaign"}
+          <Button onClick={submit} disabled={Boolean(blocker) || saving}>
+            {isEdit ? <SaveIcon /> : <CheckIcon />}
+            {saving
+              ? isEdit
+                ? "Saving…"
+                : "Creating…"
+              : isEdit
+                ? "Save changes"
+                : "Create campaign"}
           </Button>
         )}
 
@@ -145,6 +266,33 @@ export function CampaignWizard({
       </div>
     </div>
   );
+}
+
+/** Rebuilds editor state from a stored campaign. */
+function initialFromCampaign(
+  campaign: Campaign,
+  source: SourcePreview | null,
+  profiles: SmtpProfile[]
+): WizardState {
+  const hasDesign = isEmailDesign(campaign.design);
+  return {
+    source,
+    templateId: campaign.templateId ?? "",
+    subject: campaign.subject,
+    html: campaign.html,
+    design: hasDesign ? (campaign.design as EmailDesign) : blankDesign(),
+    // A campaign with no valid design must edit as HTML so its markup survives.
+    editorMode: hasDesign && campaign.editorMode === "visual" ? "visual" : "html",
+    mapping: campaign.mapping,
+    name: campaign.name,
+    smtpProfileId:
+      campaign.smtpProfileId ??
+      profiles.find((p) => p.isDefault)?.id ??
+      profiles[0]?.id ??
+      "",
+    rateLimit: campaign.rateLimit,
+    dedupe: true,
+  };
 }
 
 /** Returns the reason the current step cannot be left, or undefined. */

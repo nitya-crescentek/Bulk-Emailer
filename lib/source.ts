@@ -1,6 +1,6 @@
 import Papa from "papaparse";
 import { HttpError } from "./http";
-import type { Row, SourceKind } from "./types";
+import type { ColumnEmailStats, Row, SourceKind } from "./types";
 
 export interface ResolvedSource {
   kind: SourceKind;
@@ -115,4 +115,30 @@ export function splitAddresses(value: string | undefined): string[] {
     .split(/[,;]/)
     .map((v) => v.trim())
     .filter((v) => isEmail(v));
+}
+
+/** Per-column address quality, so the mapping step can show real numbers. */
+export function columnEmailStats(
+  columns: string[],
+  rows: Row[]
+): Record<string, ColumnEmailStats> {
+  const stats: Record<string, ColumnEmailStats> = {};
+
+  for (const column of columns) {
+    const seen = new Set<string>();
+    const counts: ColumnEmailStats = { valid: 0, invalid: 0, blank: 0, duplicates: 0 };
+
+    for (const row of rows) {
+      const value = (row[column] ?? "").trim();
+      if (!value) counts.blank++;
+      else if (!isEmail(value)) counts.invalid++;
+      else if (seen.has(value.toLowerCase())) counts.duplicates++;
+      else {
+        counts.valid++;
+        seen.add(value.toLowerCase());
+      }
+    }
+    stats[column] = counts;
+  }
+  return stats;
 }

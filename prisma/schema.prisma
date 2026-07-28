@@ -114,6 +114,11 @@ model Template {
   name      String
   subject   String
   html      String
+  // Structured block design for the visual builder. Null when authored as raw
+  // HTML. `html` is always the rendered source of truth used for sending.
+  design    Json?
+  // "visual" | "html"
+  editorMode String  @default("visual")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -165,6 +170,10 @@ model Campaign {
   // Snapshot of the copy at creation time.
   subject String
   html    String
+  // Structured builder design (null for raw-HTML campaigns), so the campaign
+  // can be reopened in the visual builder — mirrors Template.
+  design     Json?
+  editorMode String @default("html")
   // Mapping (email column, cc/bcc, variable bindings).
   mapping Json
   rateLimit Int

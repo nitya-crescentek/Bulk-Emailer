@@ -1,7 +1,8 @@
-import { handle, HttpError, requireId, requireString } from "@/lib/http";
+import { handle, HttpError, requireId } from "@/lib/http";
 import { prisma } from "@/lib/db";
 import { requireApiUser } from "@/lib/auth";
 import { toTemplate } from "@/lib/serialize";
+import { readTemplateInput } from "@/lib/template-input";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,11 +38,7 @@ export async function PUT(
 
     const row = await prisma.template.update({
       where: { id },
-      data: {
-        name: requireString(body.name, "Template name", { max: 160 }),
-        subject: requireString(body.subject, "Subject", { max: 500 }),
-        html: requireString(body.html, "Email body", { max: 200_000 }),
-      },
+      data: readTemplateInput(body),
     });
     return { template: toTemplate(row) };
   });

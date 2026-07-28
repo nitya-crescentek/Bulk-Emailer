@@ -27,11 +27,16 @@ export interface SmtpProfile {
 
 /* ------------------------------------------------------------ Template --- */
 
+export type EditorMode = "visual" | "html";
+
 export interface Template {
   id: string;
   name: string;
   subject: string;
   html: string;
+  /** Structured builder design; null for raw-HTML templates. */
+  design: import("./email-design").EmailDesign | null;
+  editorMode: EditorMode;
   createdAt: string;
   updatedAt: string;
 }
@@ -105,6 +110,9 @@ export interface Campaign {
   templateId?: string | null;
   subject: string;
   html: string;
+  /** Structured builder design; null for raw-HTML campaigns. */
+  design: import("./email-design").EmailDesign | null;
+  editorMode: EditorMode;
   mapping: Mapping;
   rateLimit: number;
   stats: CampaignStats;

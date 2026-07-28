@@ -1,8 +1,13 @@
 import { handle, HttpError } from "@/lib/http";
 import { prisma } from "@/lib/db";
 import { requireApiUser } from "@/lib/auth";
-import { fetchCsv, isEmail, parseCsv, resolveSourceUrl } from "@/lib/source";
-import type { ColumnEmailStats, Row, SourceKind, SourcePreview } from "@/lib/types";
+import {
+  columnEmailStats,
+  fetchCsv,
+  parseCsv,
+  resolveSourceUrl,
+} from "@/lib/source";
+import type { SourceKind, SourcePreview } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,33 +83,7 @@ export async function POST(request: Request) {
       columns,
       rows: rows.slice(0, PREVIEW_ROWS),
       rowCount: rows.length,
-      emailStats: emailStats(columns, rows),
+      emailStats: columnEmailStats(columns, rows),
     };
   });
-}
-
-/** Per-column address quality, so the mapping step can show real numbers. */
-function emailStats(
-  columns: string[],
-  rows: Row[]
-): Record<string, ColumnEmailStats> {
-  const stats: Record<string, ColumnEmailStats> = {};
-
-  for (const column of columns) {
-    const seen = new Set<string>();
-    const counts: ColumnEmailStats = { valid: 0, invalid: 0, blank: 0, duplicates: 0 };
-
-    for (const row of rows) {
-      const value = (row[column] ?? "").trim();
-      if (!value) counts.blank++;
-      else if (!isEmail(value)) counts.invalid++;
-      else if (seen.has(value.toLowerCase())) counts.duplicates++;
-      else {
-        counts.valid++;
-        seen.add(value.toLowerCase());
-      }
-    }
-    stats[column] = counts;
-  }
-  return stats;
 }

@@ -1,7 +1,8 @@
-import { handle, requireString } from "@/lib/http";
+import { handle } from "@/lib/http";
 import { prisma } from "@/lib/db";
 import { requireApiUser } from "@/lib/auth";
 import { toTemplate } from "@/lib/serialize";
+import { readTemplateInput } from "@/lib/template-input";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,15 +21,10 @@ export async function GET() {
 export async function POST(request: Request) {
   return handle(async () => {
     const user = await requireApiUser();
-    const body = await request.json();
+    const input = readTemplateInput(await request.json());
 
     const row = await prisma.template.create({
-      data: {
-        userId: user.id,
-        name: requireString(body.name, "Template name", { max: 160 }),
-        subject: requireString(body.subject, "Subject", { max: 500 }),
-        html: requireString(body.html, "Email body", { max: 200_000 }),
-      },
+      data: { userId: user.id, ...input },
     });
     return { template: toTemplate(row) };
   });

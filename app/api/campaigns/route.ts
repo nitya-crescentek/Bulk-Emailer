@@ -2,8 +2,13 @@ import { clampRate, handle, HttpError, requireId, requireString } from "@/lib/ht
 import { prisma } from "@/lib/db";
 import { requireApiUser } from "@/lib/auth";
 import { toCampaign } from "@/lib/serialize";
-import { isEmail, parseCsv, splitAddresses } from "@/lib/source";
-import type { CampaignStats, FieldBinding, Mapping, Row } from "@/lib/types";
+import { parseCsv } from "@/lib/source";
+import {
+  buildRecipients,
+  normalizeMapping,
+  readCampaignContent,
+} from "@/lib/campaign-build";
+import type { CampaignStats } from "@/lib/types";
 import type { Prisma } from "@/generated/prisma/client";
 
 export const runtime = "nodejs";
@@ -71,6 +76,8 @@ export async function POST(request: Request) {
       );
     }
 
+    const content = readCampaignContent(body);
+
     const campaign = await prisma.campaign.create({
       data: {
         userId: user.id,
@@ -81,8 +88,10 @@ export async function POST(request: Request) {
         columns: source.columns,
         smtpProfileId: profile.id,
         templateId,
-        subject: requireString(body.subject, "Subject", { max: 500 }),
-        html: requireString(body.html, "Email body", { max: 200_000 }),
+        subject: content.subject,
+        html: content.html,
+        design: content.design,
+        editorMode: content.editorMode,
         mapping: mapping as unknown as Prisma.InputJsonValue,
         rateLimit: clampRate(body.rateLimit, profile.rateLimit),
       },
@@ -137,78 +146,4 @@ async function statsFor(ids: string[]): Promise<Map<string, CampaignStats>> {
     map.set(g.campaignId, stats);
   }
   return map;
-}
-
-function normalizeMapping(input: unknown, columns: string[]): Mapping {
-  const raw = (input ?? {}) as Partial<Mapping>;
-  const email = typeof raw.email === "string" ? raw.email : "";
-  if (!email || !columns.includes(email)) {
-    throw new HttpError(400, "Pick the column that holds the recipient email address.");
-  }
-
-  const variables: Record<string, FieldBinding> = {};
-  for (const [name, binding] of Object.entries(raw.variables ?? {})) {
-    const column =
-      binding?.column && columns.includes(binding.column) ? binding.column : "";
-    variables[name] = {
-      column,
-      fallback: typeof binding?.fallback === "string" ? binding.fallback : "",
-    };
-  }
-
-  const optional = (value: unknown) =>
-    typeof value === "string" && columns.includes(value) ? value : undefined;
-
-  return { email, cc: optional(raw.cc), bcc: optional(raw.bcc), variables };
-}
-
-interface NewRecipient {
-  index: number;
-  email: string;
-  row: Row;
-  cc: string | null;
-  bcc: string | null;
-  status: string;
-  attempts: number;
-  error: string | null;
-}
-
-function buildRecipients(
-  rows: Row[],
-  mapping: Mapping,
-  { dedupe }: { dedupe: boolean }
-): NewRecipient[] {
-  const seen = new Set<string>();
-
-  return rows.map((row, i) => {
-    const email = (row[mapping.email] ?? "").trim();
-    const key = email.toLowerCase();
-
-    let status = "pending";
-    let error: string | null = null;
-
-    if (!email) {
-      status = "skipped";
-      error = "No email address in this row";
-    } else if (!isEmail(email)) {
-      status = "skipped";
-      error = "Not a valid email address";
-    } else if (dedupe && seen.has(key)) {
-      status = "skipped";
-      error = "Duplicate address — already included above";
-    }
-
-    if (status === "pending") seen.add(key);
-
-    return {
-      index: i + 1,
-      email,
-      row,
-      cc: mapping.cc ? splitAddresses(row[mapping.cc]).join(", ") || null : null,
-      bcc: mapping.bcc ? splitAddresses(row[mapping.bcc]).join(", ") || null : null,
-      status,
-      attempts: 0,
-      error,
-    };
-  });
 }

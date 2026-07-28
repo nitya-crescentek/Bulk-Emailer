@@ -2,6 +2,7 @@ import { handle, HttpError, requireString } from "@/lib/http";
 import { prisma } from "@/lib/db";
 import { consumeOtp } from "@/lib/otp";
 import { createSession, toPublicUser } from "@/lib/auth";
+import { seedDefaultTemplates } from "@/lib/default-templates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +23,10 @@ export async function POST(request: Request) {
         where: { id: user.id },
         data: { emailVerifiedAt: new Date() },
       });
+      // First-time verification: give the new account its starter templates.
+      await seedDefaultTemplates(user.id).catch((err) =>
+        console.error("[verify] seeding default templates failed", err)
+      );
     }
 
     await createSession(user.id);

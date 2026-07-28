@@ -1,11 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   AlertTriangleIcon,
+  CopyIcon,
   PauseIcon,
+  PencilIcon,
   PlayIcon,
   RotateCcwIcon,
   SendIcon,
@@ -126,6 +129,24 @@ export function CampaignDetail({ initial }: { initial: Campaign }) {
     }
   }
 
+  async function duplicate() {
+    setBusy(true);
+    try {
+      const { campaign: copy } = await api<{ campaign: Campaign }>(
+        `/api/campaigns/${campaign.id}/duplicate`,
+        { method: "POST" }
+      );
+      toast.success("Copied to a new draft");
+      router.push(`/campaigns/${copy.id}`);
+      router.refresh();
+    } catch (err) {
+      toast.error(errorMessage(err));
+      setBusy(false);
+    }
+  }
+
+  const isDraft = campaign.status === "draft";
+
   return (
     <div className="space-y-6">
       {campaign.error ? (
@@ -183,6 +204,30 @@ export function CampaignDetail({ initial }: { initial: Campaign }) {
                 <RotateCcwIcon />
                 Retry {stats.failed} failed
               </Button>
+            ) : null}
+
+            {isDraft ? (
+              <Button asChild variant="outline">
+                <Link href={`/campaigns/${campaign.id}/edit`}>
+                  <PencilIcon />
+                  Edit
+                </Link>
+              </Button>
+            ) : null}
+
+            {!isDraft && !live ? (
+              <>
+                <Button asChild variant="outline">
+                  <Link href={`/campaigns/${campaign.id}/edit`}>
+                    <PencilIcon />
+                    Edit email
+                  </Link>
+                </Button>
+                <Button variant="outline" onClick={duplicate} disabled={busy}>
+                  <CopyIcon />
+                  Duplicate & resend
+                </Button>
+              </>
             ) : null}
 
             <Button variant="destructive" onClick={remove} disabled={live}>

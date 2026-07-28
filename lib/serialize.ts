@@ -8,6 +8,7 @@ import type {
   Campaign,
   CampaignStats,
   CampaignStatus,
+  EditorMode,
   Mapping,
   Recipient,
   RecipientStatus,
@@ -15,6 +16,7 @@ import type {
   SmtpProfile,
   Template,
 } from "./types";
+import type { EmailDesign } from "./email-design";
 
 export function toSmtpProfile(row: SmtpProfileRow): SmtpProfile {
   return {
@@ -40,6 +42,8 @@ export function toTemplate(row: TemplateRow): Template {
     name: row.name,
     subject: row.subject,
     html: row.html,
+    design: (row.design as unknown as EmailDesign | null) ?? null,
+    editorMode: (row.editorMode as EditorMode) ?? "visual",
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -61,6 +65,8 @@ export function toCampaign(
     templateId: row.templateId,
     subject: row.subject,
     html: row.html,
+    design: (row.design as unknown as EmailDesign | null) ?? null,
+    editorMode: (row.editorMode as EditorMode) ?? "html",
     mapping: row.mapping as unknown as Mapping,
     rateLimit: row.rateLimit,
     stats,
