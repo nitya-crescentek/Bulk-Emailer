@@ -55,6 +55,9 @@ PostgreSQL via Prisma. Each account's data is fully isolated.
   system mailbox → **verify** to activate the account and sign in.
 - Email must be verified before the app is usable; unverified sign-ins are
   redirected back to the verification screen with a fresh code.
+- **Forgot password** (link on the sign-in screen) emails a 6-digit reset code.
+  Entering it with a new password signs out every existing session and signs
+  you in. The form doesn't reveal whether an email is registered.
 - Sessions are opaque tokens stored hashed in the database and set as an
   httpOnly cookie. Passwords are hashed with scrypt; OTP codes are hashed too —
   neither is ever stored in the clear.

@@ -1,6 +1,7 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { describeMailError } from "./mailer";
 import { OTP_TTL_MINUTES } from "./otp";
+import type { OtpPurpose } from "@/generated/prisma/enums";
 
 /**
  * The platform's own mailbox (e.g. smtp2go) used for account emails like OTP
@@ -49,17 +50,32 @@ export function isSystemMailConfigured(): boolean {
   return readConfig() !== null;
 }
 
+const COPY: Record<OtpPurpose, { label: string; intro: string; ignore: string }> = {
+  EMAIL_VERIFICATION: {
+    label: "verification code",
+    intro: "Your verification code is:",
+    ignore: "If you didn't request it, you can ignore this email.",
+  },
+  PASSWORD_RESET: {
+    label: "password reset code",
+    intro: "Use this code to reset your password:",
+    ignore: "If you didn't ask to reset your password, you can ignore this email — your password won't change.",
+  },
+};
+
 /**
- * Sends a verification code. If no system mailbox is configured, in
- * development the code is logged to the server console so the flow is testable;
- * in production a missing config is an error.
+ * Sends a one-time code. If no system mailbox is configured, in development
+ * the code is logged to the server console so the flow is testable; in
+ * production a missing config is an error.
  */
 export async function sendOtpEmail(
   to: string,
   name: string,
-  code: string
+  code: string,
+  purpose: OtpPurpose = "EMAIL_VERIFICATION"
 ): Promise<void> {
   const config = readConfig();
+  const copy = COPY[purpose];
 
   if (!config) {
     if (process.env.NODE_ENV === "production") {
@@ -69,18 +85,18 @@ export async function sendOtpEmail(
     }
     console.info(
       `\n[system-mailer] No SYSTEM_SMTP_* configured — dev fallback.\n` +
-        `  Verification code for ${to}: ${code}\n`
+        `  ${copy.label[0].toUpperCase()}${copy.label.slice(1)} for ${to}: ${code}\n`
     );
     return;
   }
 
-  const subject = `Your Bulk Mailer verification code: ${code}`;
+  const subject = `Your Bulk Mailer ${copy.label}: ${code}`;
   const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;color:#111">
       <p>Hi ${escapeHtml(name || "there")},</p>
-      <p>Your verification code is:</p>
+      <p>${copy.intro}</p>
       <p style="font-size:30px;font-weight:700;letter-spacing:6px;margin:16px 0">${code}</p>
-      <p>It expires in ${OTP_TTL_MINUTES} minutes. If you didn't request it, you can ignore this email.</p>
+      <p>It expires in ${OTP_TTL_MINUTES} minutes. ${copy.ignore}</p>
     </div>`;
 
   try {
@@ -89,10 +105,10 @@ export async function sendOtpEmail(
       to,
       subject,
       html,
-      text: `Your Bulk Mailer verification code is ${code}. It expires in ${OTP_TTL_MINUTES} minutes.`,
+      text: `Your Bulk Mailer ${copy.label} is ${code}. It expires in ${OTP_TTL_MINUTES} minutes. ${copy.ignore}`,
     });
   } catch (err) {
-    throw new Error(`Could not send the verification email. ${describeMailError(err)}`);
+    throw new Error(`Could not send the ${copy.label} email. ${describeMailError(err)}`);
   }
 }
 
