@@ -1,7 +1,8 @@
 export class HttpError extends Error {
   constructor(
     readonly status: number,
-    message: string
+    message: string,
+    readonly headers?: HeadersInit
   ) {
     super(message);
     this.name = "HttpError";
@@ -35,7 +36,10 @@ export async function handle<T>(fn: () => Promise<T>): Promise<Response> {
     return Response.json(data ?? { ok: true });
   } catch (err) {
     if (err instanceof HttpError) {
-      return Response.json({ error: err.message }, { status: err.status });
+      return Response.json(
+        { error: err.message },
+        { status: err.status, headers: err.headers }
+      );
     }
     console.error("[api]", err);
     const message = err instanceof Error ? err.message : "Unexpected error";

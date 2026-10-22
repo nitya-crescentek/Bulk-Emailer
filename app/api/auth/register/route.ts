@@ -4,9 +4,12 @@ import { hashPassword, passwordProblem } from "@/lib/password";
 import { issueOtp } from "@/lib/otp";
 import { sendOtpEmail } from "@/lib/system-mailer";
 import { isEmail } from "@/lib/source";
+import { clientIp, hitLimit, REGISTER_PER_EMAIL, REGISTER_PER_IP } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const TOO_MANY = "Too many sign-up attempts.";
 
 export async function POST(request: Request) {
   return handle(async () => {
@@ -18,6 +21,11 @@ export async function POST(request: Request) {
     const password = typeof body.password === "string" ? body.password : "";
     const problem = passwordProblem(password);
     if (problem) throw new HttpError(400, problem);
+
+    // After validation so typos don't count; before the lookup so the 409
+    // below can't be used to enumerate accounts at speed.
+    await hitLimit(REGISTER_PER_IP, clientIp(request), TOO_MANY);
+    await hitLimit(REGISTER_PER_EMAIL, email, TOO_MANY);
 
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing && existing.emailVerifiedAt) {

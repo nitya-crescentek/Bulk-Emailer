@@ -24,6 +24,7 @@ PostgreSQL via Prisma. Each account's data is fully isolated.
    | `DIRECT_URL`        | Direct connection for migrations. Supabase: port 5432.                  |
    | `APP_SECRET`        | Encrypts SMTP passwords and signs OTP codes. 16+ chars.                 |
    | `SYSTEM_SMTP_*`     | The platform mailbox (e.g. smtp2go) that sends OTP verification emails. |
+   | `TRUSTED_PROXY_HOPS`| Optional. Reverse proxies in front of the app (default 1). See below.   |
 
    > If a password in a connection URL contains `@ : / ? #`, percent-encode it
    > (`@` → `%40`). This is a common cause of "invalid connection string".
@@ -63,6 +64,17 @@ PostgreSQL via Prisma. Each account's data is fully isolated.
   neither is ever stored in the clear.
 - `/account` covers profile, campaign defaults (timezone, default send rate),
   and password change.
+- **Rate limits** (429 with `Retry-After`, counters in the `RateLimit` table):
+  - Sign-in: 30 attempts per IP and 10 failed attempts per email, per 15
+    minutes. A successful sign-in clears that email's count. Unknown emails
+    are counted the same way, so the limit doesn't reveal which accounts exist.
+  - Register: 10 per IP and 5 per email, per hour.
+  - Resend/forgot keep their existing 60s per-account cooldown.
+  - The client IP is the right-most `X-Forwarded-For` entry. Run behind a
+    reverse proxy in production; without one a client can set that header
+    itself and dodge the per-IP limit (per-email limits still apply). If more
+    than one proxy sits in front (e.g. Cloudflare → nginx), set
+    `TRUSTED_PROXY_HOPS` to that count.
 
 ## How a send works
 
@@ -104,13 +116,14 @@ and **Pause** / **Resume** / **Retry failed**.
 | `User`         | Account, scrypt password hash, verification, profile & settings. |
 | `Session`      | Hashed session tokens with expiry.                               |
 | `OtpCode`      | Hashed email verification codes.                                 |
+| `RateLimit`    | Sign-in / register attempt counters, keyed by hashed IP or email. |
 | `SmtpProfile`  | A user's SMTP servers; password encrypted with `APP_SECRET`.     |
 | `Template`     | Reusable subject + HTML body.                                    |
 | `Source`       | Raw CSV of each import, so campaigns can be rebuilt.             |
 | `Campaign`     | Run config, snapshotted copy, mapping, status.                  |
 | `Recipient`    | One row per email with status, error, and SMTP message id.       |
 
-Everything except `Session`/`OtpCode`/`Recipient` carries a `userId`; recipients
+Everything except `Session`/`OtpCode`/`Recipient`/`RateLimit` carries a `userId`; recipients
 belong to a campaign. Deleting a user cascades to all their data.
 
 ## Scripts

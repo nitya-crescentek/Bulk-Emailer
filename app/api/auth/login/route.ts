@@ -4,9 +4,12 @@ import { verifyPassword } from "@/lib/password";
 import { createSession, toPublicUser } from "@/lib/auth";
 import { issueOtp } from "@/lib/otp";
 import { sendOtpEmail } from "@/lib/system-mailer";
+import { clearLimit, clientIp, hitLimit, LOGIN_PER_EMAIL, LOGIN_PER_IP } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const TOO_MANY = "Too many sign-in attempts.";
 
 export async function POST(request: Request) {
   return handle(async () => {
@@ -14,12 +17,19 @@ export async function POST(request: Request) {
     const email = requireString(body.email, "Email", { max: 320 }).toLowerCase();
     const password = typeof body.password === "string" ? body.password : "";
 
+    // Counted before the password check, and for unknown emails too, so the
+    // limit can't be raced and doesn't reveal which accounts exist.
+    await hitLimit(LOGIN_PER_IP, clientIp(request), TOO_MANY);
+    await hitLimit(LOGIN_PER_EMAIL, email, TOO_MANY);
+
     const user = await prisma.user.findUnique({ where: { email } });
     // Same error whether the email is unknown or the password is wrong.
     const ok = user ? await verifyPassword(password, user.passwordHash) : false;
     if (!user || !ok) {
       throw new HttpError(401, "Incorrect email or password.");
     }
+
+    await clearLimit(LOGIN_PER_EMAIL, email);
 
     if (!user.emailVerifiedAt) {
       // Send a fresh code and route the client to verification.

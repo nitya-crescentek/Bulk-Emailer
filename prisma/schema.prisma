@@ -80,6 +80,18 @@ model OtpCode {
   @@index([userId, purpose])
 }
 
+// Fixed-window attempt counters for the auth endpoints (see lib/rate-limit.ts).
+model RateLimit {
+  // SHA-256 of "<limit name>:<ip or email>" — attempted addresses aren't kept
+  // in the clear.
+  key     String   @id
+  count   Int      @default(0)
+  // timestamptz so the window maths in raw SQL can use the database clock.
+  resetAt DateTime @db.Timestamptz(3)
+
+  @@index([resetAt])
+}
+
 // --------------------------------------------------------- Mailer domain ---
 
 model SmtpProfile {
